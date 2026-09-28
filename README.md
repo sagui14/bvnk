@@ -2,8 +2,22 @@
 
 API tests for the BVNK QA simulator (https://qa-simulator.test.bvnk.com), written with pytest, httpx and pydantic.
 
-The manual test specs (pre-requisites, steps, expected results), the reasoning behind the chosen tests and the
-endpoint/schema traceability are in [test-design.md](test-design.md).
+## Stack
+
+Library versions are the ones locked in `uv.lock`.
+
+| Tool | Version | Used for |
+|------|---------|----------|
+| Python | >= 3.11 | language |
+| [uv](https://docs.astral.sh/uv/) | any recent | dependency management and running the tests |
+| pytest | 9.1.1 | test runner: fixtures, markers, parametrize, xfail |
+| httpx | 0.28.1 | HTTP client behind `BvnkClient` |
+| pydantic | 2.13.5 | response models, validated against the OpenAPI schemas |
+| pytest-html | 4.2.0 | self-contained HTML report in `reports/` |
+| python-dotenv | 1.2.3 | loads settings from `.env` |
+
+Concurrency and perf tests use the standard library (`threading`, `concurrent.futures`), and amounts are compared as
+`decimal.Decimal`.
 
 ## Running
 
@@ -39,7 +53,6 @@ tests/
   test_quote_validation.py   amount boundaries, invalid payloads
   test_performance.py        perf smoke test (-m perf)
   test_contract_coverage.py  meta check: every endpoint and schema in the spec has a client method / model
-test-design.md               manual test specs and traceability
 ```
 
 To cover a new endpoint, add a method to `BvnkClient`, a model for its response, and a test file.
@@ -67,7 +80,7 @@ To cover a new endpoint, add a method to `BvnkClient`, a model for its response,
 
 ## Tests
 
-3 mandatory + 10 additional tests, picked by risk (see test-design.md). Every test checks side effects
+3 mandatory + 10 additional tests, picked by risk. Every test checks side effects
 (balances, persisted quotes) as well as the response.
 
 | TC | Pri | Test | Type |
