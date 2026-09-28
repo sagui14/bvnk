@@ -1,0 +1,23 @@
+[project]
+name = "bvnk-api-tests"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "pydantic>=2",
+    "pytest",
+    "pytest-html",
+    "python-dotenv",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v -m 'not perf' --html=reports/report.html --self-contained-html"
+markers = [
+    "slow: waits around a quote's 20s expiry",
+    "security: authentication and tenant isolation",
+    "negative: invalid input is rejected with no side effects",
+    "concurrency: parallel requests against the same funds",
+    "perf: performance smoke test, not part of the default run (use -m perf)",
+]
