@@ -29,9 +29,12 @@ def test_conversion(client, wallets, source, target, amount):
     expected_fee = amount * FEE_RATE
     assert quote.fee == expected_fee
     assert quote.fees.percentage.service == Decimal("0.01")
-    expected_out = (amount - expected_fee) * quote.price
-    # the returned price is rounded to 8 decimals (TRX->ETH is ~0.00008), so allow 0.01% difference
-    assert abs(quote.amount_out - expected_out) <= expected_out * Decimal("0.0001")
+    net = amount - expected_fee
+    # the returned price is rounded to price_precision decimals while amountOut is not, so amountOut differs from
+    # net * price by at most that rounding on the net amount, plus one unit of the target currency
+    price_unit = Decimal(1).scaleb(-wallets[source].currency.price_precision)
+    target_unit = Decimal(1).scaleb(-wallets[target].currency.quantity_precision)
+    assert abs(quote.amount_out - net * quote.price) <= net * price_unit + target_unit
 
     # 2. accept - terms must stay the same
     accepted = client.accept_quote(quote.uuid)

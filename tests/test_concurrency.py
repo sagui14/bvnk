@@ -15,7 +15,7 @@ def accept_in_parallel(client, uuids: list) -> list:
 
     def accept(uuid):
         barrier.wait()
-        return client.request("PUT", f"/api/v1/quote/accept/{uuid}")
+        return client.accept_quote_raw(uuid)
 
     with ThreadPoolExecutor(len(uuids)) as pool:
         return list(pool.map(accept, uuids))

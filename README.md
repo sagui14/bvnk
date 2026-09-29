@@ -1,6 +1,6 @@
 # BVNK API tests
 
-API tests for the BVNK QA simulator (https://qa-simulator.test.bvnk.com), written with pytest, httpx and pydantic.
+API tests for the BVNK QA simulator (https://qa-simulator.test.bvnk.com), written with python, pytest, httpx and pydantic.
 
 ## Stack
 
@@ -8,26 +8,43 @@ Library versions are the ones locked in `uv.lock`.
 
 | Tool | Version | Used for |
 |------|---------|----------|
-| Python | >= 3.11 | language |
+| Python | >= 3.13 | language |
 | [uv](https://docs.astral.sh/uv/) | any recent | dependency management and running the tests |
 | pytest | 9.1.1 | test runner: fixtures, markers, parametrize, xfail |
 | httpx | 0.28.1 | HTTP client behind `BvnkClient` |
 | pydantic | 2.13.5 | response models, validated against the OpenAPI schemas |
 | pytest-html | 4.2.0 | self-contained HTML report in `reports/` |
+| pytest-xdist | 3.8.0 | runs tests in parallel (`-n auto` is set in `pyproject.toml`) |
 | python-dotenv | 1.2.3 | loads settings from `.env` |
+| tenacity | 9.1.4 | retry loop behind `BvnkClient.wait_for_settlement()` |
 
 Concurrency and perf tests use the standard library (`threading`, `concurrent.futures`), and amounts are compared as
 `decimal.Decimal`.
 
+## Setup
+
+1. Install Python 3.13 or newer and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+2. Clone the repository and install the dependencies (uv creates the virtual environment for you):
+
+   ```bash
+   git clone https://github.com/sagui14/bvnk.git
+   cd bvnk
+   uv sync
+   ```
+
+3. Optional: copy `.env.example` to `.env` if you want to change a setting (see below). The defaults work without it.
+
 ## Running
 
 ```bash
-uv sync
-uv run pytest                          # everything except the perf smoke test
+uv run pytest                              # everything except the perf smoke test
 uv run pytest -m "not slow and not perf"   # skip the quote expiry boundary test (~50s)
-uv run pytest -m perf                  # performance smoke test only
-uv run pytest -m security              # or: negative, concurrency, slow
+uv run pytest -m perf -n0                  # performance smoke test only, in one process
+uv run pytest -m security                  # or: negative, concurrency, slow
 ```
+
+Tests run in parallel by default (`-n auto`, from pytest-xdist). Pass `-n0` to run them in a single process. Use it for
+the perf test: with workers it starts 4 of them for a single test and the latency numbers are noisier.
 
 An HTML report is written to `reports/report.html` on every run. The perf test attaches its latency stats to it.
 
@@ -41,11 +58,11 @@ Settings (env variable or `.env` file):
 ```
 api/
   client.py    BvnkClient: one method per endpoint, checks the status code and validates the response.
-               request() returns the raw response for negative tests.
+               The *_raw methods return the response unchecked for negative tests (request() is the fallback).
   models.py    pydantic models for every schema in /openapi.json (+ ErrorResponse, which the spec is missing)
 tests/
   conftest.py                fixtures: new account + client per test, second account for isolation tests
-  helpers.py                 shared assertions: error bodies, 422 validation errors, balances unchanged
+  helpers.py                 FEE_RATE and balances(), a (balance, available) snapshot for plain before/after asserts
   test_conversions.py        the 3 required E2E conversions
   test_concurrency.py        parallel accepts / double spend
   test_security.py           tenant isolation, authentication
@@ -60,23 +77,19 @@ To cover a new endpoint, add a method to `BvnkClient`, a model for its response,
 
 ## Design patterns
 
+The most common ones used in the framework:
+
 | Pattern | Where | What it does here |
 |---------|-------|-------------------|
-| API client (service object) | `api/client.py` (`BvnkClient`) | Tests call `create_quote()`, `accept_quote()` etc. instead of building URLs and headers. Endpoint details live in one place. |
-| Typed happy path + raw escape hatch | `api/client.py` (`request()`), used in `test_quote_validation.py`, `test_security.py`, `test_concurrency.py`, `test_performance.py` | Typed methods assert the success status and parse the body. `request()` returns the raw response so negative tests can check error codes. |
+| API client (service object) | `api/client.py` (`BvnkClient`) | Tests call `create_quote()`, `accept_quote()` etc. instead of building URLs and headers, so endpoint details live in one place. Each typed method is built on a `*_raw()` one: the raw method sends the request, the typed one asserts the success status and parses the body. Negative tests call the raw method to check error codes and to send malformed ids. |
 | Schema models (DTOs) | `api/models.py` | One pydantic model per spec schema. `ApiModel` is the shared base that maps camelCase JSON to snake_case fields. |
-| Test data builder | `api/client.py` (`quote_request()`, `quote_body()`), `api/models.py` (`QuoteRequest.to_body()`) | Builds a valid quote request from two wallets and an amount, with defaults for everything else. |
-| Valid-then-mutate (strategy functions) | `test_quote_validation.py` (`both_amounts`, `no_amount`, ...) | Each negative case starts from a valid body and applies one small mutation function, so each case breaks exactly one thing. |
-| Fixtures as dependency injection, fresh fixture per test | `tests/conftest.py` | `account`, `client`, `wallets` and `second_client` are injected by name. Each test gets a new account, and `yield` closes the client afterwards. |
-| Custom assertions | `tests/helpers.py`, used in `test_quote_lifecycle.py`, `test_quote_validation.py`, `test_security.py` | `assert_error`, `assert_validation_error` and `assert_balances_unchanged` keep the error-body and no-side-effect checks the same everywhere. |
-| State snapshot (before/after) | `wallets` fixture in `tests/conftest.py`, `assert_balances_unchanged` in `tests/helpers.py`, balance checks in every test module | Balances are captured before the action and compared after it, so side effects are checked as well as the response. |
-| Data-driven tests | `test_conversions.py`, `test_quote_validation.py`, `test_concurrency.py`, `test_quote_lifecycle.py` (expiry boundary) | `pytest.mark.parametrize` with named `pytest.param` ids runs one test body over a table of cases. |
+| Test data builder | `api/client.py` (`quote_request()`, `quote_body()`) | Builds a valid quote request from two wallets and an amount, with defaults for everything else. Negative cases in `test_quote_validation.py` start from it and break one field. |
+| Fixtures (dependency injection) | `tests/conftest.py` | `account`, `client`, `wallets` and `second_client` are injected by name. Each test gets a new account, and `yield` closes the client afterwards. |
+| Context manager | `api/client.py` (`BvnkClient.__enter__` / `__exit__`) | `with BvnkClient(token) as client:` closes the underlying `httpx.Client` even when a test fails. |
+| Data-driven tests | `test_conversions.py`, `test_quote_validation.py`, `test_concurrency.py`, `test_quote_lifecycle.py` | `pytest.mark.parametrize` with named `pytest.param` ids runs one test body over a table of cases. |
+| Marker-based test selection | `pyproject.toml` (`markers`, `addopts`) | `slow`, `security`, `negative`, `concurrency` and `perf` select groups with `-m`. The default run excludes `perf`. |
 | Polling / wait-until | `api/client.py` (`BvnkClient.wait_for_settlement()`) | Settlement is asynchronous, so the client polls the quote until `SUCCESS` or a timeout. |
-| Barrier-synchronised concurrency | `test_concurrency.py` (`accept_in_parallel()`) | A `threading.Barrier` releases all threads together so the accepts really overlap. |
-| Baseline comparison | `test_security.py` | Access to another account's resource must return exactly what a non-existent resource returns, so ownership isn't leaked. |
-| Registry / contract mapping | `test_contract_coverage.py` (`ENDPOINTS`) | Maps every `(method, path)` in the spec to its client function, then diffs the map against `/openapi.json`. |
-| Strict expected failure | `test_concurrency.py`, `test_quote_validation.py` | Known bugs are `xfail(strict=True)`, so a fix shows up as an XPASS failure (see below). |
-| External configuration | `api/client.py` (`BASE_URL`), `test_performance.py` (`PERF_P95_MS`) | Environment and thresholds come from env variables or `.env`, not code. |
+| State snapshot (before/after) | `wallets` fixture, `balances()` in `tests/helpers.py` | Balances are captured before the action and compared after it, so side effects are checked as well as the response. |
 
 ## Tests
 
@@ -122,6 +135,8 @@ so the marker gets removed.
 5. BUG-6: in amountOut mode `price` is inverted (source per target), and `fee` isn't rounded to the currency precision.
 6. BUG-3: `amountIn = 0` returns "One of 'amountIn' or 'amountOut' must be specified but not both", which is misleading.
 7. BUG-7: `acceptanceDate` is overwritten with the settlement time.
+8. BUG-8: a fee below 0.000001 is returned in exponent notation (`"fee": "1E-7"`, e.g. a 0.001 ETH quote), which the
+   spec's decimal pattern doesn't allow. A strict client fails to parse the quote.
 
 Spec gaps: 400/401/404/412 responses are not documented, and their `{"detail": "<string>"}` body doesn't match the
 spec's `HTTPValidationError`. `/health` is unauthenticated and exposes global request counts.
