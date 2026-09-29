@@ -1,9 +1,9 @@
 import os
-import time
 from decimal import Decimal
 
 import httpx
 from dotenv import load_dotenv
+from tenacity import RetryCallState, Retrying, retry_if_result, stop_after_delay, wait_fixed
 
 from api.models import (
     EchoResponse,
@@ -36,7 +36,8 @@ def get_health() -> HealthMetrics:
 class BvnkClient:
     """One method per endpoint. Each checks the success status code and validates the body against its schema.
 
-    For negative tests use `request()`, which returns the raw response without any checks.
+    For negative tests use the `*_raw` methods, which return the response without any checks and take untyped ids.
+    `request()` is the fallback for what they can't express.
     """
 
     def __init__(self, token: str):
@@ -58,14 +59,19 @@ class BvnkClient:
         wallets = [Wallet.model_validate(w) for w in response.json()]
         return {w.currency.code: w for w in wallets}
 
+    def get_wallet_raw(self, wallet_id) -> httpx.Response:
+        return self.http.get(f"/api/wallet/{wallet_id}")
+
     def get_wallet(self, wallet_id: int) -> Wallet:
-        response = self.http.get(f"/api/wallet/{wallet_id}")
+        response = self.get_wallet_raw(wallet_id)
         assert response.status_code == 200, response.text
         return Wallet.model_validate_json(response.content)
 
+    def create_quote_raw(self, body: dict) -> httpx.Response:
+        return self.http.post("/api/v1/quote", json=body)
+
     def create_quote(self, from_wallet: Wallet, to_wallet: Wallet, amount_in=None, amount_out=None) -> Quote:
-        body = quote_request(from_wallet, to_wallet, amount_in, amount_out).to_body()
-        response = self.http.post("/api/v1/quote", json=body)
+        response = self.create_quote_raw(quote_body(from_wallet, to_wallet, amount_in, amount_out))
         assert response.status_code == 201, response.text
         return Quote.model_validate_json(response.content)
 
@@ -74,26 +80,36 @@ class BvnkClient:
         assert response.status_code == 200, response.text
         return [Quote.model_validate(q) for q in response.json()]
 
+    def get_quote_raw(self, uuid) -> httpx.Response:
+        return self.http.get(f"/api/v1/quote/{uuid}")
+
     def get_quote(self, uuid) -> Quote:
-        response = self.http.get(f"/api/v1/quote/{uuid}")
+        response = self.get_quote_raw(uuid)
         assert response.status_code == 200, response.text
         return Quote.model_validate_json(response.content)
 
+    def accept_quote_raw(self, uuid) -> httpx.Response:
+        return self.http.put(f"/api/v1/quote/accept/{uuid}")
+
     def accept_quote(self, uuid) -> Quote:
-        response = self.http.put(f"/api/v1/quote/accept/{uuid}")
+        response = self.accept_quote_raw(uuid)
         assert response.status_code == 200, response.text
         return Quote.model_validate_json(response.content)
 
     def wait_for_settlement(self, uuid, timeout: float = 15) -> Quote:
         # accept returns straight away with PROCESSING, the trade settles a few seconds later
-        deadline = time.time() + timeout
-        while True:
-            quote = self.get_quote(uuid)
-            if quote.payment_status == PaymentStatus.SUCCESS:
-                return quote
-            if time.time() > deadline:
-                raise AssertionError(f"quote {uuid} not settled after {timeout}s, status {quote.payment_status}")
-            time.sleep(0.5)
+        def not_settled(state: RetryCallState):
+            assert state.outcome is not None  # set once an attempt has finished
+            last = state.outcome.result()
+            raise AssertionError(f"quote {uuid} not settled after {timeout}s, status {last.payment_status}")
+
+        poll = Retrying(
+            retry=retry_if_result(lambda quote: quote.payment_status != PaymentStatus.SUCCESS),
+            stop=stop_after_delay(timeout),
+            wait=wait_fixed(0.5),
+            retry_error_callback=not_settled,
+        )
+        return poll(self.get_quote, uuid)
 
     def close(self):
         self.http.close()
@@ -106,13 +122,16 @@ class BvnkClient:
 
 
 def quote_request(from_wallet: Wallet, to_wallet: Wallet, amount_in=None, amount_out=None) -> QuoteRequest:
-    return QuoteRequest(
-        from_=from_wallet.currency.code,
-        to=to_wallet.currency.code,
-        from_wallet=from_wallet.id,
-        to_wallet=to_wallet.id,
-        amount_in=None if amount_in is None else Decimal(str(amount_in)),
-        amount_out=None if amount_out is None else Decimal(str(amount_out)),
+    # built from the wire-format dict: `from` is the field's alias, so the `from_=` keyword is flagged by type checkers
+    return QuoteRequest.model_validate(
+        {
+            "from": from_wallet.currency.code,
+            "to": to_wallet.currency.code,
+            "fromWallet": from_wallet.id,
+            "toWallet": to_wallet.id,
+            "amountIn": None if amount_in is None else Decimal(str(amount_in)),
+            "amountOut": None if amount_out is None else Decimal(str(amount_out)),
+        }
     )
 
 

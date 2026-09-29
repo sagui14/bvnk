@@ -1,19 +1,23 @@
 [project]
 name = "bvnk-api-tests"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "httpx",
     "pydantic>=2",
     "pytest",
     "pytest-html",
+    "pytest-xdist",
     "python-dotenv",
+    "tenacity",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-v -m 'not perf' --html=reports/report.html --self-contained-html"
+# Perf test: -m perf passes, but it starts 4 workers for a single test and took about 8s instead of 5s.
+# If you want clean latency numbers, run it with -n0, for example `uv run pytest -m perf -n0`.
+addopts = "-v -m 'not perf' --html=reports/report.html --self-contained-html -n auto"
 markers = [
     "slow: waits around a quote's 20s expiry",
     "security: authentication and tenant isolation",

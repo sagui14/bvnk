@@ -13,17 +13,20 @@ from tests.helpers import FEE_RATE
 pytestmark = pytest.mark.perf
 
 PARALLEL_REQUESTS = 20
+# Env var name: PERF (this perf test) + P95 (95th percentile latency) + MS (milliseconds).
+# Override it without editing the test, e.g. `PERF_P95_MS=500 uv run pytest -m perf`.
 P95_LIMIT_MS = float(os.getenv("PERF_P95_MS", "2000"))
 
 
 def test_create_quote_under_parallel_load(client, wallets, extras):
     """TC-13: 20 parallel quote requests all succeed, stay correct and stay within the latency budget."""
     health_before = get_health()
-    body = quote_body(wallets["ETH"], wallets["USDT"], "0.001")
+    # 0.01 keeps the fee at 0.000001: a smaller amount gets an exponent-notation fee the models reject (BUG-8)
+    body = quote_body(wallets["ETH"], wallets["USDT"], "0.01")
 
     def create(_):
         start = time.perf_counter()
-        response = client.request("POST", "/api/v1/quote", json=body)
+        response = client.create_quote_raw(body)
         return response, (time.perf_counter() - start) * 1000
 
     with ThreadPoolExecutor(PARALLEL_REQUESTS) as pool:
