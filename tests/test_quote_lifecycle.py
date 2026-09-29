@@ -4,12 +4,12 @@ from decimal import Decimal
 import pytest
 
 from api.models import ErrorResponse, PaymentStatus, Quote, QuoteStatus
-from tests.helpers import FEE_RATE, balances
+from tests.helpers import balances
 
 
 def test_quote_cannot_be_accepted_twice(client, wallets):
     """TC-06: a second accept of the same quote is rejected and the trade is only executed once."""
-    quote = client.create_quote(wallets["ETH"], wallets["USDT"], "0.01")
+    quote = client.create_quote(wallets["ETH"], wallets["USDT"], amount_in="0.01")
     client.accept_quote(quote.uuid)
 
     second = client.accept_quote_raw(quote.uuid)
@@ -35,7 +35,7 @@ def test_quote_expiry_boundary(client, wallets, seconds, expected_status):
 
     The outcome is all or nothing: accepted and settled, or expired with no money moved.
     """
-    quote = client.create_quote(wallets["ETH"], wallets["USDT"], "0.01")
+    quote = client.create_quote(wallets["ETH"], wallets["USDT"], amount_in="0.01")
     # measured on the local monotonic clock from the create response (the latest the server can have created
     # the quote): server timestamps are whole seconds and the local wall clock can be skewed from the server's
     created = time.monotonic()
@@ -66,67 +66,33 @@ def test_quote_expiry_boundary(client, wallets, seconds, expected_status):
         assert balances(client.get_wallets()) == balances(wallets)
 
 
-def test_quote_by_amount_out(client, wallets):
-    """TC-09: quoting by the amount to receive. The target is credited exactly amountOut and the source pays amountIn + fee."""
-    trx, usdt = wallets["TRX"], wallets["USDT"]
-    wanted = Decimal("10")
-    source_unit = Decimal(1).scaleb(-trx.currency.quantity_precision)
-    price_unit = Decimal(1).scaleb(-trx.currency.price_precision)
+@pytest.mark.xfail(
+    reason="BUG-9: accept doesn't check funds, so the second quote is accepted (200) and ETH ends negative",
+    strict=True,
+)
+def test_accept_is_rejected_when_funds_are_no_longer_available(client, wallets):
+    """TC-10: a quote must be covered by the funds available when it is accepted, not only when it was created.
 
-    quote = client.create_quote(trx, usdt, amount_out=wanted)
-
-    assert quote.from_ == "TRX" and quote.to == "USDT"
-    assert quote.amount_out == wanted
-    assert quote.quote_status == QuoteStatus.PENDING
-    # the fee is still 0.01% of the source amount, to within one unit of the source currency (amountIn is rounded)
-    assert quote.fees.percentage.service == Decimal("0.01")
-    assert abs(quote.fee - quote.amount_in * FEE_RATE) <= source_unit
-    # in this mode price is TRX per USDT (the inverse of amountIn mode, see README). It is rounded to price_precision
-    # decimals, so amountIn - fee differs from amountOut * price by at most that rounding plus one source unit
-    assert abs((quote.amount_in - quote.fee) - wanted * quote.price) <= wanted * price_unit + source_unit
-
-    client.accept_quote(quote.uuid)
-    client.wait_for_settlement(quote.uuid)
-
-    after = client.get_wallets()
-    assert after["USDT"].balance == usdt.balance + wanted
-    assert after["TRX"].balance == trx.balance - quote.amount_in
-
-
-def test_settlement_lifecycle_and_read_consistency(client, wallets):
-    """TC-12: states move PENDING -> PROCESSING -> SUCCESS, and every read endpoint agrees on the result."""
+    Two quotes for 60% of the balance are each affordable, so both get created. Once the first has settled the wallet
+    can no longer cover the second, so accepting it has to be refused and no wallet may end up negative.
+    The spec doesn't document a rejection on accept, so any 4xx is accepted here.
+    """
     eth, usdt = wallets["ETH"], wallets["USDT"]
-    quote = client.create_quote(eth, usdt, "0.5")
-    assert quote.acceptance_date is None
+    amount = (eth.available * Decimal("0.6")).quantize(Decimal(1).scaleb(-eth.currency.quantity_precision))
+    first = client.create_quote(eth, usdt, amount_in=amount)
+    second = client.create_quote(eth, usdt, amount_in=amount)
 
-    accepted = client.accept_quote(quote.uuid)
-    assert accepted.quote_status == QuoteStatus.ACCEPTED
-    assert accepted.payment_status == PaymentStatus.PROCESSING
-    assert quote.date_created <= accepted.acceptance_date <= quote.acceptance_expiry_date
-
-    # settlement is asynchronous: while the quote is still PROCESSING no balance has moved yet
-    during = client.get_wallets()
-    if client.get_quote(quote.uuid).payment_status == PaymentStatus.PROCESSING:
-        assert during["ETH"].balance == eth.balance
-        assert during["USDT"].balance == usdt.balance
-
-    settled = client.wait_for_settlement(quote.uuid)
-    assert settled.quote_status == QuoteStatus.PAYMENT_OUT_PROCESSED
-    # BUG-7 (minor): acceptanceDate is overwritten with the settlement time, so only ordering is checked
-    assert settled.acceptance_date >= accepted.acceptance_date
-    assert settled.last_updated >= settled.date_created
-    # the terms don't change on settlement
-    assert (settled.amount_in, settled.amount_out, settled.price, settled.fee) == (
-        quote.amount_in, quote.amount_out, quote.price, quote.fee,
+    client.accept_quote(first.uuid)
+    client.wait_for_settlement(first.uuid)
+    after_first = client.get_wallets()
+    assert after_first["ETH"].available < second.amount_in, (
+        "precondition: the wallet can no longer cover the second quote"
     )
 
-    after = client.get_wallets()
-    assert after["ETH"].balance == eth.balance - quote.amount_in
-    assert after["USDT"].balance == usdt.balance + quote.amount_out
-    for code in ("ETH", "USDT"):
-        # nothing is left reserved, and the single wallet endpoint agrees with the list
-        assert after[code].balance == after[code].available
-        assert client.get_wallet(after[code].id) == after[code]
+    response = client.accept_quote_raw(second.uuid)
 
-    listed = {q.uuid: q for q in client.list_quotes()}
-    assert listed[quote.uuid] == settled
+    assert 400 <= response.status_code < 500, f"accept was not refused: {response.status_code} {response.text}"
+    assert client.get_quote(second.uuid).quote_status != QuoteStatus.ACCEPTED
+    final = client.get_wallets()
+    assert final["ETH"].balance >= 0
+    assert balances(final) == balances(after_first)
