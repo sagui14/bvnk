@@ -136,5 +136,5 @@ def quote_request(from_wallet: Wallet, to_wallet: Wallet, amount_in=None, amount
 
 
 def quote_body(from_wallet: Wallet, to_wallet: Wallet, amount_in=None, amount_out=None) -> dict:
-    """Raw JSON body for negative tests that need to break it."""
+    """JSON body of a valid quote request, as a plain dict so tests can also mutate it before sending."""
     return quote_request(from_wallet, to_wallet, amount_in, amount_out).to_body()
